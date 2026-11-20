@@ -1280,3 +1280,19 @@ def side_agent_gate_notice(authority, session_id, texts, subject: str,
         return None
     except RuntimeStoreError as exc:
         return getattr(exc, "wire_message", None) or str(exc)
+
+
+async def side_agent_gate_notice_async(authority, session_id, texts,
+                                       subject: str, agent=None) -> str | None:
+    """Loop-safe :func:`side_agent_gate_notice` for ``async def`` slash
+    handlers (review 1h-r4 F3: calling the SYNC notice helper from the
+    gateway's async slash handlers re-introduced the r2 loop stall - a
+    2.5 s screen froze every session's RPC for the same duration). Runs
+    the gate in the loop's default executor and returns notice or None."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: side_agent_gate_notice(authority, session_id, texts, subject,
+                                       agent=agent))

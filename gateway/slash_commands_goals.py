@@ -211,8 +211,8 @@ class GatewayGoalCommandsMixin:
         # W1 cycle 1h r4 (round-3 F2): the focus is viewer text that becomes
         # the review agent's instructions - screen it before ANY spawn
         # (cached-agent and cold paths; gateway WS is a Desktop transport).
-        from gateway.desktop_screen import side_agent_gate_notice
-        notice = side_agent_gate_notice(
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        notice = await side_agent_gate_notice_async(
             None,
             str(getattr(agent, "session_id", "") or session_id or quick_key or ""),
             [args], "desktop-side-refine", agent=agent)
@@ -255,8 +255,8 @@ class GatewayGoalCommandsMixin:
             return error
         # W1 cycle 1h r4 (round-3 F2): /review <focus> is viewer text that
         # becomes the reviewer subagent's goal - screen it before dispatch.
-        from gateway.desktop_screen import side_agent_gate_notice
-        notice = side_agent_gate_notice(
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        notice = await side_agent_gate_notice_async(
             None,
             str(getattr(agent, "session_id", "") or cold_session_id or quick_key or ""),
             [args], "desktop-side-review", agent=agent)

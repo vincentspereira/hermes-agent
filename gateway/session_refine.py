@@ -42,6 +42,16 @@ async def refine_local_session(runner, source, focus):
     target, history = await asyncio.to_thread(load)
     if not history:
         return t('gateway.refine.nothing_yet')
+    # W1 cycle 1h r5 (round-4 F4): screen the focus BEFORE the started
+    # reply and before anything spawns - the in-thread gate ran after
+    # _side_agent/_spawn, so the caller saw "Reviewing..." with the focus
+    # echoed while the screen was still pending (and a held focus got a
+    # started reply first). Held: the notice IS the reply.
+    from gateway.desktop_screen import side_agent_gate_notice_async
+    notice = await side_agent_gate_notice_async(
+        None, str(target or ""), [focus], "desktop-side-refine")
+    if notice:
+        return notice
     from agent.background_review import finish_background_review_run, prepare_background_review_run
     from gateway.session_tui_side import _side_agent, _side_scope, _spawn
     # The guard is the session's (its side agent is per call): a /refine while one runs joins it, as
@@ -84,16 +94,6 @@ async def refine_local_session(runner, source, focus):
             agent.background_review_callback = publish
             agent._print_fn = lambda *_a, **_k: None
             try:
-                # W1 cycle 1h r4 (round-3 F2): the cold/local refine focus is
-                # viewer text - screen it before the review thread spawns.
-                from gateway.desktop_screen import side_agent_gate_notice
-                notice = side_agent_gate_notice(
-                    None,
-                    str(getattr(agent, "session_id", "") or target or ""),
-                    [focus], "desktop-side-refine", agent=agent)
-                if notice:
-                    publish(notice)
-                    return
                 review, _prompt = spawn_background_review_thread(
                     agent, _clone_background_review_messages(history), review_memory=True,
                     review_skills='skill_manage' in getattr(agent, 'valid_tool_names', set()),
