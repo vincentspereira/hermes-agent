@@ -49,6 +49,12 @@ def _admit(connection, ref, params, prefix, required='text', optional=()):
     policy = policy_for_source(authority.runner, live.source)
     if policy is None:
         raise RuntimeStoreError('permission_denied')
+    # W1 cycle 1h: /bg and /btw build detached side agents that run the
+    # viewer's text without any admission - screen it here, in the parent
+    # session's scope; a hold refuses the verb before any work starts.
+    from gateway.desktop_screen import side_agent_gate
+    side_agent_gate(authority, ref.session_id, text,
+                    subject=f"desktop-side-{'bg' if prefix == 'bg' else 'btw'}")
     return live, policy, text, f'{prefix}_{uuid.uuid4().hex[:6]}'
 
 

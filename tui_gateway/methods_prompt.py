@@ -1496,6 +1496,15 @@ def _side_agent_args(rid, params, prefix):
     text, parent = params.get("text", ""), params.get("session_id", "")
     if not text:
         return None, None, None, None, _err(rid, 4012, "text required")
+    # W1 cycle 1h: /bg and /btw build detached side agents that never cross
+    # an admission - screen the text in the parent session's scope before
+    # anything spawns; a hold refuses the verb with the control-plane error.
+    # Scope resolves from the parent AGENT's durable session id (the RPC's
+    # session_id is the UI id); no authority handle is needed here.
+    from gateway.desktop_screen import side_agent_gate
+    durable_id = str(getattr(session.get("agent"), "session_id", "") or parent or "")
+    side_agent_gate(None, durable_id, text,
+                    subject=f"desktop-side-{'bg' if prefix == 'bg' else 'btw'}")
     return session, text, parent, f"{prefix}_{uuid.uuid4().hex[:6]}", None
 
 

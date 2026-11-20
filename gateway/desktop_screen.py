@@ -1136,3 +1136,81 @@ def tui_turn_gate(sid: str, session, text) -> str | None:
                           "tier": f"skipped_{reason}"})
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Side-agent gate (cycle 1h): /bg (prompt.background) and /btw (prompt.btw)
+#
+# Both verbs take viewer-authored text and build a DETACHED side agent that
+# runs run_conversation with it - never an admission, never a FIFO turn, so
+# neither the tui turn gate nor any submission seam sees the text. Two entry
+# points share the shape: gateway/session_tui_side._admit (the shared-owner
+# path) and tui_gateway/methods_prompt._side_agent_args (the tui-local
+# path). The gate screens the text in the PARENT session's scope; a hold
+# raises the control-plane refusal so the verb replies with an error
+# instead of starting the side agent.
+
+
+def side_agent_gate(authority, session_id, text, subject: str = "desktop-side") -> None:
+    """Screen one side-agent prompt (/bg, /btw) before it spawns. Same
+    engine/budget/tiers/logging as every seam; raises RuntimeStoreError
+    ``desktop_screen_hold`` on a block verdict. NEVER raises otherwise;
+    every skip writes a reason-only record (subject ``desktop-side``).
+    Scope: the PARENT session's stored source (row first, snapshot
+    fallback) against the interactive scoped sources - a side agent
+    inherits its parent's surface; unresolvable under the Desktop
+    backend screens (fail-closed, as everywhere)."""
+    reason = None
+    try:
+        if not desktop_screen_enabled():
+            reason = "disabled"
+            return
+        texts = _parts_texts(text)
+        if not texts:
+            reason = "no_text"
+            return
+        label = None
+        try:
+            label = _source_from_db(session_id)
+        except Exception:
+            label = None
+        if not label:
+            try:
+                label = _source_from_store(
+                    getattr(authority, "db", None), session_id)
+            except Exception:
+                label = None
+        if not label:
+            if _flag("HERMES_DESKTOP").lower() in ("1", "true", "yes", "on"):
+                label = "desktop"
+            else:
+                reason = "out_of_scope"
+                return
+        if label not in _scoped_sources():
+            reason = "out_of_scope"
+            return
+        held, reasons = _screen_texts_sync(subject, str(session_id or ""), texts)
+        if not held:
+            return
+        raise hold_error(reasons)
+    except RuntimeStoreError:
+        raise
+    except Exception:
+        logger.warning("desktop_screen: side-agent gate failed; proceeding",
+                       exc_info=True)
+        reason = "error"
+        return
+    finally:
+        if reason is not None:
+            try:
+                global _DISABLED_LOGGED
+                emit = True
+                if reason == "disabled":
+                    emit = not _DISABLED_LOGGED
+                    _DISABLED_LOGGED = True
+                if emit:
+                    _log({"subject": subject,
+                          "session": str(session_id or ""),
+                          "tier": f"skipped_{reason}"})
+            except Exception:
+                pass
