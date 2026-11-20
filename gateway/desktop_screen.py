@@ -1151,21 +1151,55 @@ def tui_turn_gate(sid: str, session, text) -> str | None:
 # instead of starting the side agent.
 
 
-def side_agent_gate(authority, session_id, text, subject: str = "desktop-side") -> None:
-    """Screen one side-agent prompt (/bg, /btw) before it spawns. Same
-    engine/budget/tiers/logging as every seam; raises RuntimeStoreError
-    ``desktop_screen_hold`` on a block verdict. NEVER raises otherwise;
-    every skip writes a reason-only record (subject ``desktop-side``).
-    Scope: the PARENT session's stored source (row first, snapshot
-    fallback) against the interactive scoped sources - a side agent
-    inherits its parent's surface; unresolvable under the Desktop
-    backend screens (fail-closed, as everywhere)."""
+def _label_via_store(store, session_id) -> str | None:
+    """Source label from a real store handle: the ROW first via its
+    ``_read_ctx`` (review 1h-M2a: the advertised snapshots fallback is
+    dead - no store in this tree exposes ``.snapshots``, so a real
+    SessionDB/handle was previously never consulted and only the
+    HERMES_DESKTOP process flag saved the gate), then the client-proxy
+    snapshots path. Never raises."""
+    try:
+        ctx = getattr(store, "_read_ctx", None)
+        if callable(ctx):
+            with ctx() as conn:
+                row = conn.execute(
+                    "SELECT source, created_source FROM sessions WHERE id = ?",
+                    (str(session_id),)).fetchone()
+            if row:
+                resolved = _resolve_label(row[0], row[1])
+                if resolved:
+                    return resolved
+    except Exception:
+        pass
+    try:
+        return _source_from_store(store, session_id)
+    except Exception:
+        return None
+
+
+def side_agent_gate(authority, session_id, text, subject: str = "desktop-side",
+                    agent=None) -> None:
+    """Screen one side-agent prompt (/bg, /btw, preview.restart, /refine)
+    before it spawns. ``text`` may be ONE string or a list of the verb's
+    viewer-text fields (review 1h-M1: preview.restart carries url + cwd +
+    console context; screening only the URL let the other two reach the
+    model prompt). Same engine/budget/tiers/logging as every seam; raises
+    RuntimeStoreError ``desktop_screen_hold`` on a block verdict. NEVER
+    raises otherwise; every skip writes a reason-only record. Scope: the
+    PARENT session's stored source - default-DB row, then the parent
+    agent's own store handle (``agent._session_db``, the tui turn gate's
+    resolution), then the desktop-backend process scope."""
     reason = None
     try:
         if not desktop_screen_enabled():
             reason = "disabled"
             return
-        texts = _parts_texts(text)
+        values = text if isinstance(text, list) else [text]
+        texts: list = []
+        for value in values:
+            for part in _parts_texts(value):
+                if part not in texts:
+                    texts.append(part)
         if not texts:
             reason = "no_text"
             return
@@ -1174,12 +1208,12 @@ def side_agent_gate(authority, session_id, text, subject: str = "desktop-side") 
             label = _source_from_db(session_id)
         except Exception:
             label = None
-        if not label:
-            try:
-                label = _source_from_store(
-                    getattr(authority, "db", None), session_id)
-            except Exception:
-                label = None
+        if not label and agent is not None:
+            label = _label_via_store(getattr(agent, "_session_db", None),
+                                     session_id)
+        if not label and authority is not None:
+            label = _label_via_store(getattr(authority, "db", None),
+                                     session_id)
         if not label:
             if _flag("HERMES_DESKTOP").lower() in ("1", "true", "yes", "on"):
                 label = "desktop"
@@ -1214,3 +1248,19 @@ def side_agent_gate(authority, session_id, text, subject: str = "desktop-side") 
                           "tier": f"skipped_{reason}"})
             except Exception:
                 pass
+
+
+async def side_agent_gate_async(authority, session_id, texts, subject: str,
+                                agent=None) -> None:
+    """Loop-safe variant of :func:`side_agent_gate` for async handlers
+    (review 1h-M2: calling the sync gate from ``async def`` handlers ran
+    ``_screen_texts_sync``'s thread-pool ``.result()`` on the event loop
+    and stalled other connections' RPCs for the whole screen). Runs the
+    same gate in the loop's default executor; refuses identically."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: side_agent_gate(authority, session_id, texts, subject,
+                                agent=agent))

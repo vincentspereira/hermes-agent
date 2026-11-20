@@ -77,6 +77,22 @@ def _format_live_refine_output(sid: str, session: Optional[dict], arg: str) -> s
         return "Refine unavailable (no session)."
     if session.get("running"):
         return "Agent is running — wait for the turn to finish, then /refine."
+    # W1 cycle 1h r2 (round-1 M2): the /refine argument is viewer text that
+    # reaches the review agent as "user focus — prioritize it"; screen it in
+    # the parent session's scope before anything spawns. Slash replies are
+    # text, so a hold returns the notice as the reply.
+    if arg.strip():
+        from hermes_state_runtime import RuntimeStoreError
+        from gateway.desktop_screen import side_agent_gate
+        try:
+            side_agent_gate(
+                None,
+                str(getattr(session.get("agent"), "session_id", "")
+                    or session.get("session_key") or ""),
+                [arg], "desktop-side-refine",
+                agent=session.get("agent"))
+        except RuntimeStoreError as exc:
+            return f"Held by the desktop intake screen: {exc}"
     if _session_uses_compute_host(session):
         command = "/refine" + (f" {arg}" if arg.strip() else "")
         try:

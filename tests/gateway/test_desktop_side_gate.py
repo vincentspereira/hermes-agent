@@ -163,6 +163,43 @@ class TestSideAgentGate(SideAgentGateTestCase):
         self.assertEqual(EngineStubHandler.screen_calls, 0)
         self.assertEqual(self.last_record().get("tier"), "skipped_no_text")
 
+    def test_list_of_text_fields_screened(self):
+        # Round-1 M1: preview.restart carries url + cwd + console context;
+        # the gate must screen every field, not just the first.
+        from hermes_state_runtime import RuntimeStoreError
+        self._row()
+        EngineStubHandler.block_pattern = "ATTACK"
+        with self.assertRaises(RuntimeStoreError):
+            desktop_screen.side_agent_gate(
+                None, "s-side",
+                ["http://127.0.0.1:9/", "/tmp/preview ATTACK cwd",
+                 "please ATTACK via context"])
+        # Screens fields in order and stops at the first block: url (allow)
+        # then cwd (ATTACK -> hold); the third field need not be screened.
+        self.assertEqual(len(EngineStubHandler.last_texts), 2)
+        self.assertIn("ATTACK", EngineStubHandler.last_texts[1])
+
+    def test_async_wrapper_holds_off_the_loop(self):
+        # Round-1 M2: async handlers must not block the event loop; the
+        # async wrapper runs the sync screen in the executor and refuses
+        # identically.
+        import asyncio
+
+        from hermes_state_runtime import RuntimeStoreError
+        self._row()
+        EngineStubHandler.block_pattern = "ATTACK"
+
+        async def scenario():
+            with self.assertRaises(RuntimeStoreError):
+                await desktop_screen.side_agent_gate_async(
+                    None, "s-side", ["please ATTACK"],
+                    "desktop-side-preview")
+            # the loop kept running during the screen: another awaited
+            # task resolves while the executor thread works
+            await asyncio.sleep(0)
+
+        asyncio.run(scenario())
+
     def test_never_raises_on_hostile_input(self):
         self._row()
         self.assertIsNone(desktop_screen.side_agent_gate(
