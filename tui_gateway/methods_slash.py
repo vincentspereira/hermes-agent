@@ -38,6 +38,22 @@ def _format_live_review_output(sid: str, session: Optional[dict], arg: str) -> s
     ``_session_owns_notification_event`` matches to drain it back into this chat."""
     if session is None:
         return "Nothing to review yet — send a message first."
+    # W1 cycle 1h r3 (round-2 finding 2): the /review argument is viewer text
+    # that lands in the reviewer subagent's goal ("Review: {focus}") - same
+    # class as /refine. Screen FIRST, before any other work; slash replies
+    # are text, so a hold returns the notice as the reply.
+    if arg and arg.strip():
+        from hermes_state_runtime import RuntimeStoreError
+        from gateway.desktop_screen import side_agent_gate
+        try:
+            side_agent_gate(
+                None,
+                str(getattr(session.get("agent"), "session_id", "")
+                    or session.get("session_key") or ""),
+                [arg], "desktop-side-review",
+                agent=session.get("agent"))
+        except RuntimeStoreError as exc:
+            return getattr(exc, "wire_message", None) or str(exc)
     if _session_uses_compute_host(session):
         return "/review runs on the local agent only for now — this session's agent lives on a remote compute host."
     if (agent := session.get("agent")) is None:
@@ -92,7 +108,7 @@ def _format_live_refine_output(sid: str, session: Optional[dict], arg: str) -> s
                 [arg], "desktop-side-refine",
                 agent=session.get("agent"))
         except RuntimeStoreError as exc:
-            return f"Held by the desktop intake screen: {exc}"
+            return getattr(exc, "wire_message", None) or str(exc)
     if _session_uses_compute_host(session):
         command = "/refine" + (f" {arg}" if arg.strip() else "")
         try:

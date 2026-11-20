@@ -1267,7 +1267,7 @@ def _(rid, params: dict) -> dict:
     except Exception as exc:
         from hermes_state_runtime import RuntimeStoreError
         if isinstance(exc, RuntimeStoreError):
-            return _err(rid, 4001, str(exc))
+            return _err(rid, 4001, getattr(exc, "wire_message", str(exc)))
         raise
     task_id = f"preview_{uuid.uuid4().hex[:6]}"
     parent = params.get("session_id", "")
@@ -1525,7 +1525,8 @@ def _side_agent_args(rid, params, prefix):
                         f"desktop-side-{'bg' if prefix == 'bg' else 'btw'}",
                         agent=session.get("agent"))
     except RuntimeStoreError as exc:
-        return None, None, None, None, _err(rid, 4001, str(exc))
+        return None, None, None, None, _err(
+            rid, 4001, getattr(exc, "wire_message", str(exc)))
     return session, text, parent, f"{prefix}_{uuid.uuid4().hex[:6]}", None
 
 

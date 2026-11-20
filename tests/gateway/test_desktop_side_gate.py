@@ -206,5 +206,50 @@ class TestSideAgentGate(SideAgentGateTestCase):
             None, "s-side", object()))
 
 
+class TestHookFrames(unittest.TestCase):
+    """Round-2 finding 1/L: the tui-side refusals must carry the owner
+    NOTICE (wire_message), not the bare reason token - asserted at the
+    handler level, where the divergence lived."""
+
+    def _holding_gate(self):
+        from unittest import mock
+
+        from gateway import desktop_screen
+
+        def _raise(*args, **kwargs):
+            raise desktop_screen.hold_error(["jailbreak", "secrets"])
+
+        return mock.patch.object(desktop_screen, "side_agent_gate", _raise)
+
+    def test_refine_reply_carries_the_notice_and_spawns_nothing(self):
+        from unittest import mock
+
+        from tui_gateway import methods_slash
+
+        agent = mock.Mock(session_id="s-1")
+        session = {"agent": agent, "session_key": "s-1", "running": False}
+        with self._holding_gate(), \
+                mock.patch("agent.review_engine.start_review") as started:
+            reply = methods_slash._format_live_refine_output("ui-1", session,
+                                                             "ATTACK focus")
+        self.assertIn("Held by the desktop intake screen", reply)
+        self.assertNotIn("desktop_screen_hold", reply)
+        started.assert_not_called()
+
+    def test_review_reply_carries_the_notice_and_spawns_nothing(self):
+        from unittest import mock
+
+        from tui_gateway import methods_slash
+
+        agent = mock.Mock(session_id="s-1", _session_messages=[])
+        session = {"agent": agent, "session_key": "s-1", "running": False}
+        with self._holding_gate(), \
+                mock.patch("agent.review_engine.start_review") as started:
+            reply = methods_slash._format_live_review_output("ui-1", session,
+                                                             "ATTACK focus")
+        self.assertIn("Held by the desktop intake screen", reply)
+        started.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
