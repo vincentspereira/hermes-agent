@@ -324,6 +324,35 @@ def submit_texts(params) -> list:
         for part in _parts_texts(value):
             if part not in texts:
                 texts.append(part)
+    # W1 cycle 1g: the API turn's own model-facing channels - client-supplied
+    # conversation history (adopted verbatim as the model transcript,
+    # run_turn_runner) and the ephemeral system prompt (settings.
+    # ephemeral_system_prompt -> the model's system prompt). Round-1d F3/F4:
+    # hostile history behind a benign ``text`` passed a scope-matched gate,
+    # and ``instructions`` rode unscreened on every seam. USER and SYSTEM
+    # history rows are screened (round-1g M1: a client-fabricated system
+    # row is instruction text one role label away - the stripper that
+    # normally removes system rows is bypassed on this path); assistant/
+    # tool rows are the caller's own prior outputs (and screening them
+    # would double-screen relays).
+    if isinstance(params, dict):
+        api_turn = params.get("api_turn_v1")
+        if isinstance(api_turn, dict):
+            history = api_turn.get("history")
+            if isinstance(history, list):
+                for entry in history:
+                    if not isinstance(entry, dict) or \
+                            entry.get("role") not in ("user", "system"):
+                        continue
+                    for part in _parts_texts(entry.get("content")):
+                        if part not in texts:
+                            texts.append(part)
+            settings = api_turn.get("settings")
+            if isinstance(settings, dict):
+                for part in _parts_texts(
+                        settings.get("ephemeral_system_prompt")):
+                    if part not in texts:
+                        texts.append(part)
     return texts
 
 
@@ -945,12 +974,48 @@ def chat_gate(chat, agent, message) -> str | None:
 # gated seam. This is seam 3.
 
 
+# The API door's own session sources (cycle 1g): author-supplied text
+# rides this door (message, client history, instructions), so its
+# sessions are screened by definition - unlike cron, a machine producer.
+_API_DOOR_SOURCES = frozenset({"api_server", "bot_room"})
+
+
+def _api_door_label(authority, session_id) -> str | None:
+    """Stored source label for one API-door session (row first, snapshot
+    fallback; never raises; None when unresolvable). Reuses the 1c
+    resolution helpers without the interactive-screening semantics.
+    Each path is independently guarded: a failing default-DB read must
+    not skip the authority's own store fallback."""
+    label = None
+    try:
+        label = _source_from_db(session_id)
+    except Exception:
+        label = None
+    if not label:
+        try:
+            label = _source_from_store(
+                getattr(authority, "db", None), session_id)
+        except Exception:
+            label = None
+    return label
+
+
 def api_turn_gate(authority, session_id, payload) -> None:
     """Screen one API-turn admission BEFORE ``admit_session_input``
     writes it. Same engine, chunking, budget, tiers, logging and
     outcome reporting as the other seams; raises the control-plane
     hold (RuntimeStoreError reason ``desktop_screen_hold``) on a block
     verdict so the HTTP surface returns the admission refusal.
+
+    Door-local scope (cycle 1g, round-1d F1): ``admit_api_steps`` only
+    admits sessions whose stored source is ``api_server``/``bot_room``,
+    which the interactive-scope resolver can never match - the 1d gate
+    was dead code on its own seam. The API door relays AUTHOR-SUPPLIED
+    text (message, client history, instructions), not machine-produced
+    output like cron, so the door's own sessions are IN scope by
+    definition, plus any interactive-scope label. Live population on
+    this install is currently zero (checked 20 Nov); the door matters
+    for replication (ZCode/other harnesses drive this API).
     NEVER raises otherwise; every skip writes a ``skipped_<reason>``
     record (reason only, never text) with subject ``desktop-api``."""
     reason = None
@@ -962,7 +1027,8 @@ def api_turn_gate(authority, session_id, payload) -> None:
         if not texts:
             reason = "no_text"
             return
-        if not session_in_scope(authority, session_id):
+        label = _api_door_label(authority, session_id)
+        if label is None or label not in (_scoped_sources() | _API_DOOR_SOURCES):
             reason = "out_of_scope"
             return
         held, reasons = _screen_texts_sync("desktop-api", session_id, texts)
