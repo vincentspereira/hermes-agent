@@ -329,9 +329,12 @@ def submit_texts(params) -> list:
     # run_turn_runner) and the ephemeral system prompt (settings.
     # ephemeral_system_prompt -> the model's system prompt). Round-1d F3/F4:
     # hostile history behind a benign ``text`` passed a scope-matched gate,
-    # and ``instructions`` rode unscreened on every seam. Only user-role
-    # history entries are viewer text; assistant/tool rows are the caller's
-    # own prior outputs (and screening them would double-screen relays).
+    # and ``instructions`` rode unscreened on every seam. USER and SYSTEM
+    # history rows are screened (round-1g M1: a client-fabricated system
+    # row is instruction text one role label away - the stripper that
+    # normally removes system rows is bypassed on this path); assistant/
+    # tool rows are the caller's own prior outputs (and screening them
+    # would double-screen relays).
     if isinstance(params, dict):
         api_turn = params.get("api_turn_v1")
         if isinstance(api_turn, dict):
@@ -339,7 +342,7 @@ def submit_texts(params) -> list:
             if isinstance(history, list):
                 for entry in history:
                     if not isinstance(entry, dict) or \
-                            entry.get("role") != "user":
+                            entry.get("role") not in ("user", "system"):
                         continue
                     for part in _parts_texts(entry.get("content")):
                         if part not in texts:
