@@ -79,23 +79,33 @@ never modified or deleted). Queued envelopes held on drain are marked
 the same way: the dispatching envelope's row is staged as the
 ``_submit_user_row`` the cleanup stamps.
 
-## API-turn admission path (cycle 1d, 19 Nov 2026)
+## API-turn admission path (cycles 1d + 1g, 19–20 Nov 2026)
 
-The 19 Nov live test proved the Desktop app's turns take a THIRD
-route: the serve's HTTP api_server ->
-``gateway/session_api_turn._admit_api_payload``, which admits via
-``admit_session_input`` directly (principal ``api``) - bypassing both
-gated seams. ``api_turn_gate`` screens the admission's model-visible
-text (``text`` / ``api_text`` / nested ``cli_turn_v1.api_text`` /
-multimodal parts) BEFORE the durable admission; a block verdict
-raises the same hold, and the HTTP surface returns the admission
-refusal. Same engine, budget, tiers, logging, outcome reporting; every
-skip writes a reason-only record with subject ``desktop-api``.
-History-only admissions (``history_from_session``) carry no new viewer
-text and skip as ``skipped_no_text`` - each turn's own message is
-screened when it arrives. The cron admission path
-(``session_cron.py``) is a machine producer and stays out of scope by
-design.
+The serve's HTTP api_server also exposes the OpenAI-compatible session
+API -> ``gateway/session_api_turn._admit_api_payload``, which admits via
+``admit_session_input`` directly (principal ``api``). ``api_turn_gate``
+screens the admission's model-visible text BEFORE durable admission; a
+block verdict raises the same hold and the HTTP surface returns the
+admission refusal.
+
+DOOR-LOCAL SCOPE (1g): the door only admits sessions whose stored
+source is ``api_server``/``bot_room`` (everything else is refused
+``permission_denied`` upstream), which the interactive scope resolver
+can never match — the 1d gate was dead code on its own seam. The door
+relays AUTHOR-SUPPLIED text (message, client history, instructions),
+not machine-produced output like cron, so its own sessions are in
+scope by definition (plus any interactive-scope label). Live
+population on this install is currently zero (checked 20 Nov); the
+door matters for replication (other harnesses drive this API).
+
+SCREENED CHANNELS (1g): payload ``text``/``api_text`` (incl. multimodal
+parts), nested ``cli_turn_v1.api_text``, ``api_turn_v1.history``
+user-role entries (client history becomes the model transcript), and
+``api_turn_v1.settings.ephemeral_system_prompt`` (instructions ride
+into the system prompt). Assistant/tool history rows are the caller's
+own prior outputs and are not screened. History-only admissions with
+no user-role text skip as ``skipped_no_text``. The cron admission path
+(``session_cron.py``) remains out of scope as a machine producer.
 
 ## Desktop serve chat path (cycle 1c, 17 Nov 2026)
 

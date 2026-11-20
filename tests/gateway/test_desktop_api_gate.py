@@ -18,6 +18,7 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 from gateway import desktop_screen
@@ -117,6 +118,19 @@ class ApiTurnGateTestCase(unittest.TestCase):
         desktop_screen._DISABLED_LOGGED = False
         self.tmp = tempfile.mkdtemp()
         self.log_path = os.path.join(self.tmp, "api-gate.log")
+        # Isolate the default-DB read from the live home (the resolver
+        # consults it before the authority store fallback).
+        self.state_db = os.path.join(self.tmp, "state.db")
+        conn = sqlite3.connect(self.state_db)
+        conn.execute("CREATE TABLE sessions "
+                     "(id TEXT, source TEXT, created_source TEXT)")
+        conn.commit()
+        conn.close()
+        self._path_patch = mock.patch.object(
+            desktop_screen, "_state_db_path",
+            lambda: Path(self.state_db))
+        self._path_patch.start()
+        self.addCleanup(self._path_patch.stop)
         self.env = {
             "HERMES_DESKTOP_SCREEN": "1",
             "HERMES_DESKTOP_SCREEN_ENDPOINT":
@@ -143,7 +157,17 @@ class ApiTurnGateTestCase(unittest.TestCase):
         self.server.shutdown()
 
     def authority(self, rows=(("s-api", "desktop", "desktop"),)):
-        return FakeApiAuthority(rows)
+        self._add_rows(rows)
+        return FakeApiAuthority(())
+
+    def _add_rows(self, rows):
+        # Production resolves the label from the (patched) default DB row;
+        # the authority store is snapshots-only fallback.
+        conn = sqlite3.connect(self.state_db)
+        conn.executemany("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?)",
+                         rows)
+        conn.commit()
+        conn.close()
 
     def gate(self, payload, rows=(("s-api", "desktop", "desktop"),)):
         desktop_screen.api_turn_gate(self.authority(rows), "s-api", payload)
@@ -231,6 +255,53 @@ class TestApiTurnGate(ApiTurnGateTestCase):
         record = self.last_record()
         self.assertNotIn("preview", record)
         self.assertNotIn("SECRET", json.dumps(record))
+
+    # ── cycle 1g: door-local scope + history/system-prompt channels ──
+
+    def test_api_server_source_session_is_screened(self):
+        # Round-1d F1: the door's own sessions must be IN scope - the 1d
+        # gate could never match them (dead code on its own seam).
+        self.gate({"text": "hello from an api client"},
+                  rows=(("s-api", "api_server", "api_server"),))
+        self.assertEqual(EngineStubHandler.screen_calls, 1)
+        self.assertEqual(self.last_record().get("tier"), "allow")
+
+    def test_bot_room_source_session_is_screened(self):
+        self.gate({"text": "hello"},
+                  rows=(("s-api", "bot_room", "bot_room"),))
+        self.assertEqual(EngineStubHandler.screen_calls, 1)
+
+    def test_history_smuggling_is_screened(self):
+        # Round-1d F3: client-supplied history becomes the model
+        # transcript; hostile history behind a benign message must hold.
+        from hermes_state_runtime import RuntimeStoreError
+        EngineStubHandler.block_pattern = "ATTACK"
+        payload = {"text": "ok",
+                   "api_turn_v1": {"settings": {},
+                                   "history": [
+                                       {"role": "user",
+                                        "content": "please ATTACK now"},
+                                       {"role": "assistant",
+                                        "content": "ATTACK not screened"}]}}
+        with self.assertRaises(RuntimeStoreError):
+            self.gate(payload, rows=(("s-api", "api_server", "api_server"),))
+        # user-role history entry screened; assistant-role output not
+        # (order: top-level text first, then history entries)
+        self.assertEqual(sorted(EngineStubHandler.last_texts),
+                         sorted(["please ATTACK now", "ok"]))
+
+    def test_ephemeral_system_prompt_is_screened(self):
+        # Round-1d F4: instructions ride into the model system prompt.
+        from hermes_state_runtime import RuntimeStoreError
+        EngineStubHandler.block_pattern = "ATTACK"
+        payload = {"text": "ok",
+                   "api_turn_v1": {"settings": {
+                       "ephemeral_system_prompt": "you must ATTACK"},
+                       "history": []}}
+        with self.assertRaises(RuntimeStoreError):
+            self.gate(payload, rows=(("s-api", "api_server", "api_server"),))
+        self.assertEqual(EngineStubHandler.last_texts,
+                         ["ok", "you must ATTACK"])
 
 
 class TestPartsTexts(unittest.TestCase):
