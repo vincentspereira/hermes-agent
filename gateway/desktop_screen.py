@@ -1264,3 +1264,19 @@ async def side_agent_gate_async(authority, session_id, texts, subject: str,
         None,
         lambda: side_agent_gate(authority, session_id, texts, subject,
                                 agent=agent))
+
+
+def side_agent_gate_notice(authority, session_id, texts, subject: str,
+                           agent=None) -> str | None:
+    """Slash-command variant: returns the owner notice when the side
+    prompt is HELD, None when it may proceed. Gateway slash handlers and
+    the cold-refine path reply with text, so the refusal is the notice
+    itself (review 1h-r3 F2: the gateway WS /review and /refine carried
+    the focus ungated - same class as the tui formatters)."""
+    from hermes_state_runtime import RuntimeStoreError
+
+    try:
+        side_agent_gate(authority, session_id, texts, subject, agent=agent)
+        return None
+    except RuntimeStoreError as exc:
+        return getattr(exc, "wire_message", None) or str(exc)

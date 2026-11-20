@@ -251,5 +251,27 @@ class TestHookFrames(unittest.TestCase):
         started.assert_not_called()
 
 
+class TestGateNoticeHelper(unittest.TestCase):
+    """The gateway slash handlers reply with text - side_agent_gate_notice
+    converts a hold into the owner notice and None when it may proceed."""
+
+    def test_hold_returns_notice_benign_returns_none(self):
+        from unittest import mock
+
+        from gateway import desktop_screen
+
+        def _raise(*args, **kwargs):
+            raise desktop_screen.hold_error(["jailbreak"])
+
+        with mock.patch.object(desktop_screen, "side_agent_gate", _raise):
+            notice = desktop_screen.side_agent_gate_notice(
+                None, "s-1", ["ATTACK"], "desktop-side-review")
+        self.assertIn("Held by the desktop intake screen", notice)
+        with mock.patch.object(desktop_screen, "side_agent_gate",
+                               lambda *a, **k: None):
+            self.assertIsNone(desktop_screen.side_agent_gate_notice(
+                None, "s-1", ["benign"], "desktop-side-review"))
+
+
 if __name__ == "__main__":
     unittest.main()

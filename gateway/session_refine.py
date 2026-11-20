@@ -84,6 +84,16 @@ async def refine_local_session(runner, source, focus):
             agent.background_review_callback = publish
             agent._print_fn = lambda *_a, **_k: None
             try:
+                # W1 cycle 1h r4 (round-3 F2): the cold/local refine focus is
+                # viewer text - screen it before the review thread spawns.
+                from gateway.desktop_screen import side_agent_gate_notice
+                notice = side_agent_gate_notice(
+                    None,
+                    str(getattr(agent, "session_id", "") or target or ""),
+                    [focus], "desktop-side-refine", agent=agent)
+                if notice:
+                    publish(notice)
+                    return
                 review, _prompt = spawn_background_review_thread(
                     agent, _clone_background_review_messages(history), review_memory=True,
                     review_skills='skill_manage' in getattr(agent, 'valid_tool_names', set()),
