@@ -78,10 +78,63 @@ def emits(monkeypatch):
     return captured
 
 
+@pytest.fixture(autouse=True)
+def _isolated_desktop_screen(tmp_path, monkeypatch):
+    """W1 cycle 1f, second isolation fix: since 1d the real turn path
+    imports the desktop screen, and the test process inherits the LIVE
+    environment (HERMES_DESKTOP=1 / HERMES_DESKTOP_SCREEN=1 from the
+    Desktop app). Unisolated, every turn-driving test writes gate
+    records to the REAL ``~/.hermes/logs/desktop-screen.log`` — which
+    this suite's home_io_guard (correctly) refuses. Disable the gate
+    and point its log at the tmp home; retention semantics are covered
+    by the dedicated gate suites, not this one."""
+    monkeypatch.setenv("HERMES_DESKTOP_SCREEN", "")
+    monkeypatch.setenv("HERMES_DESKTOP_SCREEN_LOG",
+                       str(tmp_path / "desktop-screen.log"))
+
+
 @pytest.fixture()
 def turn_env(monkeypatch, tmp_path):
-    """Neutralize the turn pipeline's environment-heavy side paths."""
-    monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    """Neutralize the turn pipeline's environment-heavy side paths.
+
+    W1 cycle 1f: the original ``monkeypatch.setattr(server.threading,
+    "Thread", _InlineThread)`` patched the stdlib ``threading`` module
+    itself (``server.threading`` IS the global module), inlining EVERY
+    thread in the process during the patch window — including the
+    desktop screen's ThreadPoolExecutor bridge since cycle 1d, whose
+    blocking worker loop then ran on the MAIN thread and hung 16/19
+    tests (round-3 N1). The turn's real spawn boundary is
+    ``_start_session_work`` (session_lifecycle -> spawn_context_thread):
+    scope the inline shim THERE, in the namespaces the turn path
+    resolves it from (prompt_turn's own module globals and
+    session_lifecycle's, for any direct callers). Everything else in
+    the process sees real threads.
+    """
+    from tui_gateway import prompt_turn as _pt
+    from tui_gateway import session_lifecycle as _sl
+
+    class _InlineWorkThread:
+        def __init__(self, target):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+    def _inline_start(target, *, name, session=None):
+        thread = _InlineWorkThread(target)
+        if session is not None:
+            session["_run_thread"] = thread
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(server, "_start_session_work", _inline_start)
+    monkeypatch.setattr(_sl, "_start_session_work", _inline_start)
     monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
     monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda sid, session: None)
     monkeypatch.setattr(server, "_session_cwd", lambda session: str(tmp_path))
