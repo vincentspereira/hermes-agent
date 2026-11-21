@@ -49,6 +49,9 @@ def _admit(connection, ref, params, prefix, required='text', optional=()):
     policy = policy_for_source(authority.runner, live.source)
     if policy is None:
         raise RuntimeStoreError('permission_denied')
+    # W1 cycle 1h r2: the /bg, /btw and preview.restart gates run in the
+    # async handlers below (loop-safe), covering each verb's own text
+    # fields - see side_agent_gate.
     return live, policy, text, f'{prefix}_{uuid.uuid4().hex[:6]}'
 
 
@@ -177,6 +180,12 @@ def _spawn(authority, ref, task_id, event_type, body, extra=None, holder=None):
 async def background(connection, ref, params):
     """``/bg <prompt>``: a fresh agent on the session's route runs the prompt to completion."""
     live, policy, text, task_id = _admit(connection, ref, params, 'bg')
+    # W1 cycle 1h r2: screen the verb's text before any side work starts
+    # (loop-safe: the sync screen runs in the executor, not the event loop).
+    from gateway.desktop_screen import side_agent_gate_async
+    await side_agent_gate_async(connection.authority, ref.session_id, [text],
+                                'desktop-side-bg',
+                                agent=connection.authority.agent(ref))
     authority = connection.authority
     holder = [None]
 
@@ -200,6 +209,10 @@ async def btw(connection, ref, params):
     (``agent/side_question.py``); the live history, FIFO and prompt cache stay untouched."""
     _live, policy, text, task_id = _admit(connection, ref, params, 'btw')
     authority = connection.authority
+    # W1 cycle 1h r2: same gate as /bg (loop-safe, before any side work).
+    from gateway.desktop_screen import side_agent_gate_async
+    await side_agent_gate_async(authority, ref.session_id, [text],
+                                'desktop-side-btw', agent=authority.agent(ref))
     # The resident agent's conversation (a cache-parity fork replays it); a session with no
     # resident agent (never ran a turn here, or evicted) answers from its stored transcript.
     agent = authority.agent(ref)
@@ -261,6 +274,13 @@ async def preview_restart(connection, ref, params):
                                         optional=('cwd', 'context'))
     authority = connection.authority
     cwd, context = (str(params.get(key) or '').strip() for key in ('cwd', 'context'))
+    # W1 cycle 1h r2 (round-1 M1): the preview agent's MODEL PROMPT carries
+    # url + cwd + console context, but the old gate screened only the URL -
+    # screen every viewer-text field, before any side work, loop-safe.
+    from gateway.desktop_screen import side_agent_gate_async
+    await side_agent_gate_async(authority, ref.session_id, [url, cwd, context],
+                                'desktop-side-preview',
+                                agent=authority.agent(ref))
     from gateway.session_local_recovery import transcript_target
     target = transcript_target(authority, ref)
     holder = [None]

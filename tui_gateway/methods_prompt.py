@@ -1254,6 +1254,21 @@ def _(rid, params: dict) -> dict:
     url, cwd, context = (str(params.get(k) or "").strip() for k in ("url", "cwd", "context"))
     if not url:
         return _err(rid, 4012, "url required")
+    # W1 cycle 1h r2 (round-1 M1): the model prompt carries url + cwd +
+    # console context - screen every viewer-text field before spawning.
+    from gateway.desktop_screen import side_agent_gate
+    try:
+        side_agent_gate(
+            None,
+            str(getattr(session.get("agent"), "session_id", "")
+                or params.get("session_id", "")),
+            [url, cwd, context], "desktop-side-preview",
+            agent=session.get("agent"))
+    except Exception as exc:
+        from hermes_state_runtime import RuntimeStoreError
+        if isinstance(exc, RuntimeStoreError):
+            return _err(rid, 4001, getattr(exc, "wire_message", str(exc)))
+        raise
     task_id = f"preview_{uuid.uuid4().hex[:6]}"
     parent = params.get("session_id", "")
     with session.get("history_lock") or contextlib.nullcontext():
@@ -1496,6 +1511,22 @@ def _side_agent_args(rid, params, prefix):
     text, parent = params.get("text", ""), params.get("session_id", "")
     if not text:
         return None, None, None, None, _err(rid, 4012, "text required")
+    # W1 cycle 1h: /bg and /btw build detached side agents that never cross
+    # an admission - screen the text in the parent session's scope before
+    # anything spawns. Round-1 M2: the refusal must be the CONTROL-PLANE
+    # frame (4001 + the hold notice), not an escaped exception (the rpc
+    # dispatcher has no RuntimeStoreError branch, so a raise reached the
+    # client as a generic "handler error" with the notice text lost).
+    from hermes_state_runtime import RuntimeStoreError
+    from gateway.desktop_screen import side_agent_gate
+    durable_id = str(getattr(session.get("agent"), "session_id", "") or parent or "")
+    try:
+        side_agent_gate(None, durable_id, [text],
+                        f"desktop-side-{'bg' if prefix == 'bg' else 'btw'}",
+                        agent=session.get("agent"))
+    except RuntimeStoreError as exc:
+        return None, None, None, None, _err(
+            rid, 4001, getattr(exc, "wire_message", str(exc)))
     return session, text, parent, f"{prefix}_{uuid.uuid4().hex[:6]}", None
 
 

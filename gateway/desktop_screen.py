@@ -1136,3 +1136,163 @@ def tui_turn_gate(sid: str, session, text) -> str | None:
                           "tier": f"skipped_{reason}"})
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Side-agent gate (cycle 1h): /bg (prompt.background) and /btw (prompt.btw)
+#
+# Both verbs take viewer-authored text and build a DETACHED side agent that
+# runs run_conversation with it - never an admission, never a FIFO turn, so
+# neither the tui turn gate nor any submission seam sees the text. Two entry
+# points share the shape: gateway/session_tui_side._admit (the shared-owner
+# path) and tui_gateway/methods_prompt._side_agent_args (the tui-local
+# path). The gate screens the text in the PARENT session's scope; a hold
+# raises the control-plane refusal so the verb replies with an error
+# instead of starting the side agent.
+
+
+def _label_via_store(store, session_id) -> str | None:
+    """Source label from a real store handle: the ROW first via its
+    ``_read_ctx`` (review 1h-M2a: the advertised snapshots fallback is
+    dead - no store in this tree exposes ``.snapshots``, so a real
+    SessionDB/handle was previously never consulted and only the
+    HERMES_DESKTOP process flag saved the gate), then the client-proxy
+    snapshots path. Never raises."""
+    try:
+        ctx = getattr(store, "_read_ctx", None)
+        if callable(ctx):
+            with ctx() as conn:
+                row = conn.execute(
+                    "SELECT source, created_source FROM sessions WHERE id = ?",
+                    (str(session_id),)).fetchone()
+            if row:
+                resolved = _resolve_label(row[0], row[1])
+                if resolved:
+                    return resolved
+    except Exception:
+        pass
+    try:
+        return _source_from_store(store, session_id)
+    except Exception:
+        return None
+
+
+def side_agent_gate(authority, session_id, text, subject: str = "desktop-side",
+                    agent=None) -> None:
+    """Screen one side-agent prompt (/bg, /btw, preview.restart, /refine)
+    before it spawns. ``text`` may be ONE string or a list of the verb's
+    viewer-text fields (review 1h-M1: preview.restart carries url + cwd +
+    console context; screening only the URL let the other two reach the
+    model prompt). Same engine/budget/tiers/logging as every seam; raises
+    RuntimeStoreError ``desktop_screen_hold`` on a block verdict. NEVER
+    raises otherwise; every skip writes a reason-only record. Scope: the
+    PARENT session's stored source - default-DB row, then the parent
+    agent's own store handle (``agent._session_db``, the tui turn gate's
+    resolution), then the desktop-backend process scope."""
+    reason = None
+    try:
+        if not desktop_screen_enabled():
+            reason = "disabled"
+            return
+        values = text if isinstance(text, list) else [text]
+        texts: list = []
+        for value in values:
+            for part in _parts_texts(value):
+                if part not in texts:
+                    texts.append(part)
+        if not texts:
+            reason = "no_text"
+            return
+        label = None
+        try:
+            label = _source_from_db(session_id)
+        except Exception:
+            label = None
+        if not label and agent is not None:
+            label = _label_via_store(getattr(agent, "_session_db", None),
+                                     session_id)
+        if not label and authority is not None:
+            label = _label_via_store(getattr(authority, "db", None),
+                                     session_id)
+        if not label:
+            if _flag("HERMES_DESKTOP").lower() in ("1", "true", "yes", "on"):
+                label = "desktop"
+            else:
+                reason = "out_of_scope"
+                return
+        if label not in _scoped_sources():
+            reason = "out_of_scope"
+            return
+        held, reasons = _screen_texts_sync(subject, str(session_id or ""), texts)
+        if not held:
+            return
+        raise hold_error(reasons)
+    except RuntimeStoreError:
+        raise
+    except Exception:
+        logger.warning("desktop_screen: side-agent gate failed; proceeding",
+                       exc_info=True)
+        reason = "error"
+        return
+    finally:
+        if reason is not None:
+            try:
+                global _DISABLED_LOGGED
+                emit = True
+                if reason == "disabled":
+                    emit = not _DISABLED_LOGGED
+                    _DISABLED_LOGGED = True
+                if emit:
+                    _log({"subject": subject,
+                          "session": str(session_id or ""),
+                          "tier": f"skipped_{reason}"})
+            except Exception:
+                pass
+
+
+async def side_agent_gate_async(authority, session_id, texts, subject: str,
+                                agent=None) -> None:
+    """Loop-safe variant of :func:`side_agent_gate` for async handlers
+    (review 1h-M2: calling the sync gate from ``async def`` handlers ran
+    ``_screen_texts_sync``'s thread-pool ``.result()`` on the event loop
+    and stalled other connections' RPCs for the whole screen). Runs the
+    same gate in the loop's default executor; refuses identically."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        lambda: side_agent_gate(authority, session_id, texts, subject,
+                                agent=agent))
+
+
+def side_agent_gate_notice(authority, session_id, texts, subject: str,
+                           agent=None) -> str | None:
+    """Slash-command variant: returns the owner notice when the side
+    prompt is HELD, None when it may proceed. Gateway slash handlers and
+    the cold-refine path reply with text, so the refusal is the notice
+    itself (review 1h-r3 F2: the gateway WS /review and /refine carried
+    the focus ungated - same class as the tui formatters)."""
+    from hermes_state_runtime import RuntimeStoreError
+
+    try:
+        side_agent_gate(authority, session_id, texts, subject, agent=agent)
+        return None
+    except RuntimeStoreError as exc:
+        return getattr(exc, "wire_message", None) or str(exc)
+
+
+async def side_agent_gate_notice_async(authority, session_id, texts,
+                                       subject: str, agent=None) -> str | None:
+    """Loop-safe :func:`side_agent_gate_notice` for ``async def`` slash
+    handlers (review 1h-r4 F3: calling the SYNC notice helper from the
+    gateway's async slash handlers re-introduced the r2 loop stall - a
+    2.5 s screen froze every session's RPC for the same duration). Runs
+    the gate in the loop's default executor and returns notice or None."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: side_agent_gate_notice(authority, session_id, texts, subject,
+                                       agent=agent))
