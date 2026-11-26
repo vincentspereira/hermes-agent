@@ -49,6 +49,20 @@ class GatewayGoalCommandsMixin:
                 return t("gateway.goal.gate_add_admin_only")
             return None
 
+        # W1 cycle 1i: the goal directive is viewer text that reaches the
+        # model as enqueued turns (and persists across them) - screen it
+        # before anything is dispatched or enqueued.
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        goal_args = (event.get_command_args() or "").strip()
+        print("W1I-DEBUG goal_args:", repr(goal_args)[:60])
+        if goal_args:
+            notice = await side_agent_gate_notice_async(
+                None,
+                str(getattr(mgr, "session_id", "") or ""),
+                [goal_args], "desktop-side-goal")
+            if notice:
+                return notice
+
         def dispatch():
             return dispatch_goal_command(
                 mgr, event.get_command_args() or "", authorize_gate=authorize_gate,
@@ -151,6 +165,17 @@ class GatewayGoalCommandsMixin:
         if tokens[0].lower() == "every" and len(tokens) >= 2:
             interval = parse_interval(f"every {tokens[1]}")
             prompt = tokens[2] if len(tokens) > 2 else ""
+        # W1 cycle 1i: the heartbeat prompt is viewer text re-injected on
+        # every due beat (persisting across turns) - screen the set before
+        # it persists. Pause/resume/clear/status carry no new text.
+        if prompt:
+            from gateway.desktop_screen import side_agent_gate_notice_async
+            notice = await side_agent_gate_notice_async(
+                None,
+                str(getattr(mgr, "session_id", "") or ""),
+                [prompt], "desktop-side-heartbeat")
+            if notice:
+                return notice
         else:
             interval = parse_interval(tokens[0])
             prompt = args[len(tokens[0]):].strip() if interval and interval > 0 else ""
@@ -299,6 +324,16 @@ class GatewayGoalCommandsMixin:
             return t("gateway.subgoal.no_goal")
         if not args:
             return f"{mgr.status_line()}\n{mgr.render_subgoals()}"
+        # W1 cycle 1i: subgoal criteria are viewer text appended to the
+        # active goal - screen the added criteria before they persist.
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        if args and args.lower() != "status":
+            notice = await side_agent_gate_notice_async(
+                None,
+                str(getattr(mgr, "session_id", "") or ""),
+                [args], "desktop-side-subgoal")
+            if notice:
+                return notice
         tokens = args.split(None, 1)
         verb = tokens[0].lower()
         rest = tokens[1].strip() if len(tokens) > 1 else ""
