@@ -49,6 +49,19 @@ class GatewayGoalCommandsMixin:
                 return t("gateway.goal.gate_add_admin_only")
             return None
 
+        # W1 cycle 1i: the goal directive is viewer text that reaches the
+        # model as enqueued turns (and persists across them) - screen it
+        # before anything is dispatched or enqueued.
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        goal_args = (event.get_command_args() or "").strip()
+        if goal_args:
+            notice = await side_agent_gate_notice_async(
+                None,
+                str(getattr(mgr, "session_id", "") or ""),
+                [goal_args], "desktop-side-goal")
+            if notice:
+                return notice
+
         def dispatch():
             return dispatch_goal_command(
                 mgr, event.get_command_args() or "", authorize_gate=authorize_gate,
@@ -154,6 +167,18 @@ class GatewayGoalCommandsMixin:
         else:
             interval = parse_interval(tokens[0])
             prompt = args[len(tokens[0]):].strip() if interval and interval > 0 else ""
+        # W1 cycle 1i (r2): BOTH set forms carry the prompt, so the screen
+        # runs after the branches converge, before validation persists it.
+        # (r1 gated only the `every` form; the bare-interval form computed
+        # its prompt after the gate and persisted it unscreened.)
+        if prompt:
+            from gateway.desktop_screen import side_agent_gate_notice_async
+            notice = await side_agent_gate_notice_async(
+                None,
+                str(getattr(mgr, "session_id", "") or ""),
+                [prompt], "desktop-side-heartbeat")
+            if notice:
+                return notice
         if interval is None:
             return t("gateway.heartbeat.usage")
         if interval < 0:
@@ -299,6 +324,16 @@ class GatewayGoalCommandsMixin:
             return t("gateway.subgoal.no_goal")
         if not args:
             return f"{mgr.status_line()}\n{mgr.render_subgoals()}"
+        # W1 cycle 1i: subgoal criteria are viewer text appended to the
+        # active goal - screen the added criteria before they persist.
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        if args and args.lower() != "status":
+            notice = await side_agent_gate_notice_async(
+                None,
+                str(getattr(mgr, "session_id", "") or ""),
+                [args], "desktop-side-subgoal")
+            if notice:
+                return notice
         tokens = args.split(None, 1)
         verb = tokens[0].lower()
         rest = tokens[1].strip() if len(tokens) > 1 else ""
@@ -346,6 +381,21 @@ class GatewayGoalCommandsMixin:
             return t("gateway.loop.no_session")
         mgr = LoopManager(session_id=sid)
 
+        # W1 cycle 1i (r2): the loop prompt is viewer text persisted by
+        # dispatch_loop_command and re-injected on every tick as an ordinary
+        # user turn - screen the set form BEFORE dispatch. Control verbs
+        # (status/pause/resume/stop/clear/cancel/help) carry no model text.
+        loop_args = (event.get_command_args() or "").strip()
+        if loop_args and loop_args.lower() not in {
+            "status", "pause", "resume", "stop", "clear", "cancel",
+            "help", "--help", "-h",
+        }:
+            from gateway.desktop_screen import side_agent_gate_notice_async
+            notice = await side_agent_gate_notice_async(
+                None, sid, [loop_args], "desktop-side-loop")
+            if notice:
+                return notice
+
         # New loops capture the event's routing so the idle loop-wakeup watcher can inject ticks
         # here after a restart; best-effort, empty fields dropped. ``profile`` pins the wakeup to this
         # session's own bot under multiplex (the watcher must never fire it through the default bot).
@@ -360,7 +410,7 @@ class GatewayGoalCommandsMixin:
                 route = {k: v for k, v in route.items() if v}
         except Exception:
             route = {}
-        result = dispatch_loop_command(mgr, (event.get_command_args() or "").strip(), route=route)
+        result = dispatch_loop_command(mgr, loop_args, route=route)
         output = result.get("output") or ""
         if result.get("created") and _quiet_bool(lambda: goal_blocks_loop_tick(mgr.session_id)):
             output += t("gateway.loop.goal_defers_note")

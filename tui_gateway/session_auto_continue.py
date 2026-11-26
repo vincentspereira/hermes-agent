@@ -248,6 +248,18 @@ def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: 
     """Apply ``agent.<method>(plain_text)`` (steer/redirect); on acceptance record the correction, scrub stale
     self-duplicates so the live turn's original text is not re-fired after settle, and return the ``status`` reply.
     None → caller falls through to the queue path."""
+    # W1 cycle 1i (r2): steer/redirect text lands in model requests as a user
+    # message - screen before acceptance (sync is safe here: busy submits run
+    # on server worker threads, same as the 1d turn gate). A hold returns None
+    # so the caller falls through to the queued-prompt path, whose turn gate
+    # holds it with the owner-visible notice; the running agent never sees it.
+    try:
+        from gateway.desktop_screen import side_agent_gate
+        side_agent_gate(None, str(session.get("session_id") or session.get("sid") or ""),
+                        [plain_text], "desktop-tui-steer")
+    except Exception as exc:
+        if getattr(exc, "reason", "") == "desktop_screen_hold":
+            return None
     try:
         if not getattr(agent, method)(plain_text):
             return None
