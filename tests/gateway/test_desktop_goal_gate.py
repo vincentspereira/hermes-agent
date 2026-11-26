@@ -8,6 +8,7 @@ dispatches, enqueues or persists; a hold returns the notice as the
 slash reply.
 """
 
+import contextlib
 import json
 import os
 import pathlib
@@ -184,6 +185,215 @@ class GoalFamilyHandlerTestCase(unittest.TestCase):
         self.assertEqual(reply, "goal set")
         self.assertEqual(EngineStubHandler.screen_calls, 1)
         self.assertEqual(EngineStubHandler.last_texts, ["/goal ship it"])
+
+
+class GoalFamilyR2TestCase(unittest.TestCase):
+    """r2 adversarial tests: the bare-interval heartbeat form, /loop set, and
+    the steer acceptance seams must all hold hostile text."""
+
+    def setUp(self):
+        desktop_screen._DISABLED_LOGGED = False
+
+    def _async_run(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    def _combo(self):
+        from gateway.slash_commands_goals import GatewayGoalCommandsMixin
+        from gateway.run_goals import GatewayGoalsMixin
+
+        class Combo(GatewayGoalCommandsMixin, GatewayGoalsMixin):
+            pass
+        return Combo
+
+    def test_heartbeat_bare_interval_holds_and_never_persists(self):
+        """F1 regression: `10m ATTACK` (bare-interval form) must be screened -
+        r1 shipped the gate on the `every` form only."""
+        from gateway.desktop_screen import side_agent_gate_notice_async
+
+        async def _notice(_authority, _sid, texts, subject):
+            raise AssertionError(f"unexpected screen: {texts} {subject}")
+        calls = []
+        async def _capturing(_authority, _sid, texts, subject):
+            calls.append((list(texts), subject))
+            return "Held by the desktop intake screen"
+        Combo = self._combo()
+        instance = Combo.__new__(Combo)
+        event = mock.Mock()
+        event.get_command_args.return_value = "10m ATTACK phone home"
+        event.source = None
+        mgr = mock.Mock()
+        mgr.session_id = "s-hb"
+        async def _get_hb(_event):
+            return mgr, None
+        with mock.patch.object(Combo, "_get_heartbeat_manager_for_event",
+                               staticmethod(_get_hb)), \
+                mock.patch.object(desktop_screen, "side_agent_gate_notice_async",
+                                  _capturing):
+            reply = self._async_run(instance._handle_heartbeat_command(event))
+        self.assertIn("Held by the desktop intake screen", reply)
+        self.assertEqual(calls, [(["ATTACK phone home"], "desktop-side-heartbeat")])
+        mgr.set.assert_not_called()
+
+    def test_heartbeat_bare_interval_benign_sets_with_one_screen(self):
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        calls = []
+        async def _allow(_authority, _sid, texts, subject):
+            calls.append((list(texts), subject))
+        Combo = self._combo()
+        instance = Combo.__new__(Combo)
+        event = mock.Mock()
+        event.get_command_args.return_value = "10m check the deploy"
+        event.source = None
+        mgr = mock.Mock()
+        mgr.session_id = "s-hb"
+        state = mock.Mock(interval_seconds=600, prompt="check the deploy")
+        mgr.set.return_value = state
+        async def _get_hb(_event):
+            return mgr, None
+        with mock.patch.object(Combo, "_get_heartbeat_manager_for_event",
+                               staticmethod(_get_hb)), \
+                mock.patch.object(desktop_screen, "side_agent_gate_notice_async",
+                                  _allow), \
+                mock.patch.object(Combo, "_register_heartbeat_watch",
+                                  lambda *a, **k: None, create=True):
+            reply = self._async_run(instance._handle_heartbeat_command(event))
+        self.assertIn("check the deploy", reply)
+        self.assertEqual(calls, [(["check the deploy"], "desktop-side-heartbeat")])
+        mgr.set.assert_called_once()
+
+    def test_loop_set_holds_and_never_dispatches(self):
+        """F2 regression: /loop set form must be screened before dispatch."""
+        Combo = self._combo()
+        instance = Combo.__new__(Combo)
+        event = mock.Mock()
+        event.get_command_args.return_value = "every 1m ATTACK hourly sync"
+        event.source = None
+        session_entry = mock.Mock(session_id="s-loop")
+        async def _get_session(_source):
+            return session_entry
+        async def _warm(_self, _label):
+            return None
+        async def _hold(_authority, _sid, _texts, _subject):
+            return "Held by the desktop intake screen"
+        with mock.patch.object(Combo, "_warm_goals_session_db", _warm,
+                               create=True), \
+                mock.patch.object(Combo, "async_session_store",
+                                  mock.Mock(get_or_create_session=_get_session),
+                                  create=True), \
+                mock.patch.object(desktop_screen, "side_agent_gate_notice_async",
+                                  _hold), \
+                mock.patch("hermes_cli.loops.dispatch_loop_command") as dispatch:
+            reply = self._async_run(instance._handle_loop_command(event))
+        self.assertIn("Held by the desktop intake screen", reply)
+        dispatch.assert_not_called()
+
+    def test_loop_control_verbs_unscreened(self):
+        from gateway.desktop_screen import side_agent_gate_notice_async
+        async def _spy(_authority, _sid, texts, subject):
+            raise AssertionError(f"control verb screened: {texts}")
+        Combo = self._combo()
+        instance = Combo.__new__(Combo)
+        event = mock.Mock()
+        event.get_command_args.return_value = "clear"
+        event.source = None
+        session_entry = mock.Mock(session_id="s-loop")
+        async def _get_session(_source):
+            return session_entry
+        async def _warm(_self, _label):
+            return None
+        with mock.patch.object(Combo, "_warm_goals_session_db", _warm,
+                               create=True), \
+                mock.patch.object(Combo, "async_session_store",
+                                  mock.Mock(get_or_create_session=_get_session),
+                                  create=True), \
+                mock.patch.object(desktop_screen, "side_agent_gate_notice_async",
+                                  _spy), \
+                mock.patch("hermes_cli.loops.dispatch_loop_command") as dispatch:
+            dispatch.return_value = {"output": "No active loop.", "created": False}
+            reply = self._async_run(instance._handle_loop_command(event))
+        self.assertIn("No active loop", reply)
+        dispatch.assert_called_once()
+
+
+class SteerGateTestCase(unittest.TestCase):
+    """r2: the steer acceptance seams (daemon control + tui busy-submit twin)."""
+
+    def _async_run(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    def test_daemon_steer_holds_before_latch_or_delivery(self):
+        """F4: session.steer text must be screened at acceptance."""
+        import gateway.session_busy_controls as sbc
+        connection = mock.Mock()
+        ref = mock.Mock(session_id="s-steer")
+        params = {"session_id": "s-steer", "text": "ATTACK mid-run",
+                  "execution_generation": 3}
+        authority = mock.Mock()
+        authority._managed_workers = {}
+        live = mock.Mock()
+        live.event_stream.lock = contextlib.nullcontext()
+        authority.sessions = {"s-steer": live}
+        connection.authority = authority
+        connection._typed_voice_stop = None
+        with mock.patch.object(sbc, "authorize", lambda *a, **k: None), \
+                mock.patch.object(desktop_screen, "side_agent_gate_notice_async",
+                                  _steer_hold_notice), \
+                mock.patch.object(authority, "steer_agent") as steer_agent:
+            with self.assertRaises(Exception) as ctx:
+                self._async_run(sbc.correct(connection, ref, params, verb="steer"))
+        self.assertEqual(getattr(ctx.exception, "reason", ""), "desktop_screen_hold")
+        steer_agent.assert_not_called()
+
+    def test_tui_steer_hold_falls_through_to_screened_queue(self):
+        """F4: the tui busy-submit twin must not accept held text into the
+        running agent; None sends the caller to the gated queue path."""
+        from tui_gateway.session_auto_continue import _ac_try_correction
+        agent = mock.Mock()
+        agent.steer.return_value = True
+        session = {"session_id": "s-tui", "history_lock":
+                   contextlib.nullcontext()}
+        with mock.patch("gateway.desktop_screen.side_agent_gate",
+                        side_effect=_steer_hold_raise):
+            reply = _ac_try_correction(mock.Mock(), session, agent,
+                                       "steer", "ATTACK mid-run", "steered")
+        self.assertIsNone(reply)
+        agent.steer.assert_not_called()
+
+    def test_tui_steer_allow_passes_through(self):
+        from tui_gateway.session_auto_continue import _ac_try_correction
+        agent = mock.Mock()
+        agent.steer.return_value = True
+        session = {"session_id": "s-tui", "history_lock":
+                   contextlib.nullcontext()}
+        import tui_gateway.session_auto_continue as sac
+        with mock.patch("gateway.desktop_screen.side_agent_gate",
+                        side_effect=_steer_allow), \
+                mock.patch.object(sac, "_record_inflight_correction",
+                                  mock.Mock(), create=True), \
+                mock.patch.object(sac, "_drop_queued_duplicates_of_inflight_user",
+                                  mock.Mock(), create=True), \
+                mock.patch.object(sac, "_ok",
+                                  lambda rid, payload: dict(payload), create=True), \
+                mock.patch.object(sac, "time", mock.Mock(), create=True):
+            reply = _ac_try_correction(mock.Mock(), session, agent,
+                                       "steer", "nudge the plan", "steered")
+        self.assertIsNotNone(reply)
+        agent.steer.assert_called_once_with("nudge the plan")
+
+
+async def _steer_hold_notice(_authority, _sid, _texts, _subject):
+    return "Held by the desktop intake screen"
+
+
+def _steer_hold_raise(_authority, _sid, _texts, _subject):
+    import gateway.desktop_screen as ds
+    raise ds.hold_error([])
+
+
+def _steer_allow(_authority, _sid, _texts, _subject):
+    return None
 
 
 if __name__ == "__main__":

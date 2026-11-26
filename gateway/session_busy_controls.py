@@ -196,6 +196,16 @@ async def correct(connection, ref, params, *, verb):
             raise RuntimeStoreError('unsupported_control')
         # Accepted for this exact claim before its turn built an agent: steer_agent latches it for
         # the agent this generation adopts, never a later one.
+        # W1 cycle 1i (r2): steer/redirect text is viewer text that lands in
+        # model requests as a user message (tool_executor/turn_iteration_prep
+        # inject it) - screen at acceptance; the hold surfaces as the wire
+        # error and nothing latches or delivers.
+        if params['text'].strip():
+            from gateway.desktop_screen import hold_error, side_agent_gate_notice_async
+            notice = await side_agent_gate_notice_async(
+                None, ref.session_id, [params['text']], 'desktop-side-steer')
+            if notice:
+                raise hold_error([])
         agent, latched = authority.steer_agent(ref, generation, params['text'] if verb == 'steer' else None)
         if latched:
             return {'status': 'queued', 'text': params['text'], 'execution_generation': generation,

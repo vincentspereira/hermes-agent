@@ -54,7 +54,6 @@ class GatewayGoalCommandsMixin:
         # before anything is dispatched or enqueued.
         from gateway.desktop_screen import side_agent_gate_notice_async
         goal_args = (event.get_command_args() or "").strip()
-        print("W1I-DEBUG goal_args:", repr(goal_args)[:60])
         if goal_args:
             notice = await side_agent_gate_notice_async(
                 None,
@@ -165,9 +164,13 @@ class GatewayGoalCommandsMixin:
         if tokens[0].lower() == "every" and len(tokens) >= 2:
             interval = parse_interval(f"every {tokens[1]}")
             prompt = tokens[2] if len(tokens) > 2 else ""
-        # W1 cycle 1i: the heartbeat prompt is viewer text re-injected on
-        # every due beat (persisting across turns) - screen the set before
-        # it persists. Pause/resume/clear/status carry no new text.
+        else:
+            interval = parse_interval(tokens[0])
+            prompt = args[len(tokens[0]):].strip() if interval and interval > 0 else ""
+        # W1 cycle 1i (r2): BOTH set forms carry the prompt, so the screen
+        # runs after the branches converge, before validation persists it.
+        # (r1 gated only the `every` form; the bare-interval form computed
+        # its prompt after the gate and persisted it unscreened.)
         if prompt:
             from gateway.desktop_screen import side_agent_gate_notice_async
             notice = await side_agent_gate_notice_async(
@@ -176,9 +179,6 @@ class GatewayGoalCommandsMixin:
                 [prompt], "desktop-side-heartbeat")
             if notice:
                 return notice
-        else:
-            interval = parse_interval(tokens[0])
-            prompt = args[len(tokens[0]):].strip() if interval and interval > 0 else ""
         if interval is None:
             return t("gateway.heartbeat.usage")
         if interval < 0:
@@ -381,6 +381,21 @@ class GatewayGoalCommandsMixin:
             return t("gateway.loop.no_session")
         mgr = LoopManager(session_id=sid)
 
+        # W1 cycle 1i (r2): the loop prompt is viewer text persisted by
+        # dispatch_loop_command and re-injected on every tick as an ordinary
+        # user turn - screen the set form BEFORE dispatch. Control verbs
+        # (status/pause/resume/stop/clear/cancel/help) carry no model text.
+        loop_args = (event.get_command_args() or "").strip()
+        if loop_args and loop_args.lower() not in {
+            "status", "pause", "resume", "stop", "clear", "cancel",
+            "help", "--help", "-h",
+        }:
+            from gateway.desktop_screen import side_agent_gate_notice_async
+            notice = await side_agent_gate_notice_async(
+                None, sid, [loop_args], "desktop-side-loop")
+            if notice:
+                return notice
+
         # New loops capture the event's routing so the idle loop-wakeup watcher can inject ticks
         # here after a restart; best-effort, empty fields dropped. ``profile`` pins the wakeup to this
         # session's own bot under multiplex (the watcher must never fire it through the default bot).
@@ -395,7 +410,7 @@ class GatewayGoalCommandsMixin:
                 route = {k: v for k, v in route.items() if v}
         except Exception:
             route = {}
-        result = dispatch_loop_command(mgr, (event.get_command_args() or "").strip(), route=route)
+        result = dispatch_loop_command(mgr, loop_args, route=route)
         output = result.get("output") or ""
         if result.get("created") and _quiet_bool(lambda: goal_blocks_loop_tick(mgr.session_id)):
             output += t("gateway.loop.goal_defers_note")
