@@ -168,6 +168,8 @@ class HostedRoomRuntime:
         self._blocked_rooms: set[str] = set()
         self._status_lock, self._current_tasks = threading.Lock(), {}
         self._room_schedule_cursor, self._cycles = 0, 0
+        # Consecutive supervisor passes that found no room to drive (see _idle_wait_seconds).
+        self._idle_cycles = 0
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -203,6 +205,8 @@ class HostedRoomRuntime:
             # Rooms still owning a worker slot are revisited once that thread exits, closing
             # the terminal-publication/route-repair race without busy-looping idle rooms.
             self._rooms_needing_reschedule.update(self._room_threads)
+            # A wake follows a real room event: end idle backoff so the pass runs now.
+            self._idle_cycles = 0
         self._wake.set()
 
     def status(self) -> dict[str, Any]:
@@ -632,7 +636,7 @@ class HostedRoomRuntime:
                         self._record_error(f"worker maintenance failed: {exc}")
                 with self._status_lock:
                     self._cycles += 1
-                self._wake.wait(self.poll_interval_seconds)
+                self._wake.wait(self._idle_wait_seconds())
         finally:
             while True:
                 with self._status_lock:
@@ -642,6 +646,22 @@ class HostedRoomRuntime:
                 for room_thread in room_threads:
                     room_thread.join(self.active_poll_interval_seconds)
             self._release_idle_leases()
+
+    # A supervisor that owns no room still opens store reads on every pass (owned_rooms goes through
+    # the process-wide read pool). In a multiplexed gateway every served profile has a supervisor and
+    # almost none owns a room, so ~90 idle supervisors form a read-pool convoy that starves the event
+    # loop (session.create answers arrive late or never). An empty pass therefore waits longer, doubling
+    # from the idle poll to the cap; a wake or a room found resets it. A room that appears without a
+    # wake is still found, at most _IDLE_WAIT_MAX_SECONDS later.
+    _IDLE_WAIT_DOUBLINGS = 4
+    _IDLE_WAIT_MAX_SECONDS = 60.0
+
+    def _idle_wait_seconds(self) -> float:
+        with self._status_lock:
+            idle = self._idle_cycles
+        if idle <= 0:
+            return self.poll_interval_seconds
+        return min(self.poll_interval_seconds * (2 ** min(idle, self._IDLE_WAIT_DOUBLINGS)), self._IDLE_WAIT_MAX_SECONDS)
 
     def _run_cycle(self) -> None:
         with self._status_lock:
@@ -660,6 +680,8 @@ class HostedRoomRuntime:
         if available <= 0:
             return
         bindings = tuple(self._rooms_provider())
+        with self._status_lock:
+            self._idle_cycles = 0 if bindings else self._idle_cycles + 1
         if not bindings:
             return
         start = self._room_schedule_cursor % len(bindings)
